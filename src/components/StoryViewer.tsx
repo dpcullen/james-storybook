@@ -4,6 +4,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { motion } from "framer-motion";
 import type { Category } from "@/lib/categories";
 import type { StoryLength, TimeOfDay } from "@/lib/storyPrompts";
+import { getStory } from "@/lib/storyEngine";
+import { allStories } from "@/lib/stories";
 
 interface StoryViewerProps {
   category: Category;
@@ -23,50 +25,26 @@ export default function StoryViewer({
   const [story, setStory] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [narrationMode, setNarrationMode] = useState<"browser" | "elevenlabs">(
-    "browser"
-  );
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
   const storyRef = useRef<HTMLDivElement>(null);
 
-  // Pick a random theme from the category
-  const generateStory = useCallback(async () => {
+  const pickStory = useCallback(() => {
     setLoading(true);
     setStory("");
-
-    const theme =
-      category.themes[Math.floor(Math.random() * category.themes.length)];
-
-    try {
-      const response = await fetch("/api/generate-story", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          category: category.id,
-          theme,
-          length,
-          timeOfDay,
-        }),
-      });
-
-      const data = await response.json();
-      setStory(data.story);
-    } catch {
-      setStory(
-        `Once upon a time, James went on an amazing ${category.name.toLowerCase()} adventure! He had so much fun exploring and making new friends. Every moment was filled with wonder and joy. And at the end of the day, James smiled the biggest smile, because it was the best adventure ever!\n\nThe End.`
-      );
-    } finally {
+    // Small delay for a nice loading animation
+    setTimeout(() => {
+      const newStory = getStory(category.id, length, timeOfDay, allStories);
+      setStory(newStory);
       setLoading(false);
-    }
+    }, 800);
   }, [category, length, timeOfDay]);
 
   useEffect(() => {
-    generateStory();
+    pickStory();
     return () => {
       window.speechSynthesis?.cancel();
     };
-  }, [generateStory]);
+  }, [pickStory]);
 
   // Browser speech narration
   const playBrowserNarration = useCallback(() => {
@@ -79,7 +57,7 @@ export default function StoryViewer({
     }
 
     const utterance = new SpeechSynthesisUtterance(story);
-    utterance.rate = 0.85; // Slightly slower for a child
+    utterance.rate = 0.85;
     utterance.pitch = 1.0;
     utterance.volume = 1.0;
 
@@ -102,75 +80,19 @@ export default function StoryViewer({
     setIsPlaying(true);
   }, [story, isPlaying]);
 
-  // ElevenLabs narration
-  const playElevenLabsNarration = useCallback(async () => {
-    if (!story) return;
-
-    if (isPlaying && audioRef.current) {
-      audioRef.current.pause();
-      setIsPlaying(false);
-      return;
-    }
-
-    try {
-      const response = await fetch("/api/narrate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: story }),
-      });
-
-      if (!response.ok) {
-        // Fall back to browser narration
-        setNarrationMode("browser");
-        playBrowserNarration();
-        return;
-      }
-
-      const audioBlob = await response.blob();
-      const audioUrl = URL.createObjectURL(audioBlob);
-      const audio = new Audio(audioUrl);
-      audioRef.current = audio;
-
-      audio.onended = () => setIsPlaying(false);
-      audio.onerror = () => {
-        setIsPlaying(false);
-        setNarrationMode("browser");
-      };
-
-      audio.play();
-      setIsPlaying(true);
-    } catch {
-      setNarrationMode("browser");
-      playBrowserNarration();
-    }
-  }, [story, isPlaying, playBrowserNarration]);
-
-  const handlePlayPause = useCallback(() => {
-    if (narrationMode === "elevenlabs") {
-      playElevenLabsNarration();
-    } else {
-      playBrowserNarration();
-    }
-  }, [narrationMode, playElevenLabsNarration, playBrowserNarration]);
-
   const handleStop = useCallback(() => {
     window.speechSynthesis?.cancel();
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-    }
     setIsPlaying(false);
   }, []);
 
   const handleAnotherStory = useCallback(() => {
     handleStop();
-    generateStory();
+    pickStory();
     storyRef.current?.scrollTo(0, 0);
-  }, [handleStop, generateStory]);
+  }, [handleStop, pickStory]);
 
   const isNight = timeOfDay === "night";
   const textColor = isNight ? "text-blue-100" : "text-gray-800";
-  const subTextColor = isNight ? "text-blue-200/70" : "text-ocean/60";
 
   return (
     <motion.div
@@ -210,18 +132,17 @@ export default function StoryViewer({
         </motion.button>
         <div className="flex items-center gap-2">
           <span className="text-3xl">{category.emoji}</span>
-          <span className={`text-lg font-bold ${isNight ? "text-blue-200" : "text-ocean"}`}>
+          <span
+            className={`text-lg font-bold ${isNight ? "text-blue-200" : "text-ocean"}`}
+          >
             {category.name}
           </span>
         </div>
-        <div className="w-10" /> {/* Spacer for centering */}
+        <div className="w-10" />
       </div>
 
       {/* Story Content */}
-      <div
-        ref={storyRef}
-        className="flex-1 story-scroll px-6 sm:px-8 pb-32"
-      >
+      <div ref={storyRef} className="flex-1 story-scroll px-6 sm:px-8 pb-32">
         {loading ? (
           <div className="flex flex-col items-center justify-center h-full gap-4">
             <motion.div
@@ -231,13 +152,21 @@ export default function StoryViewer({
             >
               {category.emoji}
             </motion.div>
-            <p className={`text-2xl font-bold ${isNight ? "text-blue-200" : "text-ocean"}`}>
-              Creating your story...
+            <p
+              className={`text-2xl font-bold ${isNight ? "text-blue-200" : "text-ocean"}`}
+            >
+              Finding a story...
             </p>
             <div className="flex gap-2">
-              <div className={`w-4 h-4 rounded-full dot-1 ${isNight ? "bg-blue-300" : "bg-ocean"}`} />
-              <div className={`w-4 h-4 rounded-full dot-2 ${isNight ? "bg-blue-300" : "bg-ocean"}`} />
-              <div className={`w-4 h-4 rounded-full dot-3 ${isNight ? "bg-blue-300" : "bg-ocean"}`} />
+              <div
+                className={`w-4 h-4 rounded-full dot-1 ${isNight ? "bg-blue-300" : "bg-ocean"}`}
+              />
+              <div
+                className={`w-4 h-4 rounded-full dot-2 ${isNight ? "bg-blue-300" : "bg-ocean"}`}
+              />
+              <div
+                className={`w-4 h-4 rounded-full dot-3 ${isNight ? "bg-blue-300" : "bg-ocean"}`}
+              />
             </div>
           </div>
         ) : (
@@ -251,7 +180,8 @@ export default function StoryViewer({
               {story.split("\n").map((paragraph, i) => {
                 const trimmed = paragraph.trim();
                 if (!trimmed) return null;
-                const isEnding = trimmed === "The End." || trimmed === "The End";
+                const isEnding =
+                  trimmed === "The End." || trimmed === "The End";
                 return (
                   <motion.p
                     key={i}
@@ -287,7 +217,7 @@ export default function StoryViewer({
           <div className="flex items-center justify-center gap-3 p-3 max-w-xl mx-auto">
             {/* Play/Pause */}
             <motion.button
-              onClick={handlePlayPause}
+              onClick={playBrowserNarration}
               whileTap={{ scale: 0.9 }}
               className={`btn-bounce text-3xl p-3 rounded-full shadow-lg ${
                 isPlaying
@@ -316,9 +246,7 @@ export default function StoryViewer({
               onClick={handleAnotherStory}
               whileTap={{ scale: 0.9 }}
               className={`btn-bounce text-lg font-bold py-3 px-5 rounded-full shadow-lg ${
-                isNight
-                  ? "bg-indigo-700 text-white"
-                  : "bg-ocean text-white"
+                isNight ? "bg-indigo-700 text-white" : "bg-ocean text-white"
               }`}
             >
               🔄 Again!
@@ -332,9 +260,7 @@ export default function StoryViewer({
               }}
               whileTap={{ scale: 0.9 }}
               className={`btn-bounce text-lg font-bold py-3 px-5 rounded-full shadow-lg ${
-                isNight
-                  ? "bg-purple-700 text-white"
-                  : "bg-candy text-white"
+                isNight ? "bg-purple-700 text-white" : "bg-candy text-white"
               }`}
             >
               📚 New
