@@ -15,26 +15,36 @@ interface StoryViewerProps {
   onNewStory: () => void;
 }
 
-/** Prepare text for more expressive speech */
+/** Prepare text for more expressive speech.
+ *  Uses commas and periods to create natural pauses —
+ *  the speech engine treats punctuation as breathing room,
+ *  NOT as spoken words. Never insert "..." as the voice reads it literally. */
 function prepareForSpeech(text: string): string {
   let prepared = text;
-  // Add pauses after exclamations and dramatic moments
-  prepared = prepared.replace(/!/g, "! ...");
-  // Slow down sound effects by adding spaces (ALL CAPS words)
+
+  // Remove any existing ellipses so they aren't read as "dot dot dot"
+  prepared = prepared.replace(/\.{2,}/g, ",");
+  prepared = prepared.replace(/…/g, ",");
+
+  // Add a short breath pause before sound effects (ALL CAPS 3+ chars)
   prepared = prepared.replace(
-    /\b([A-Z]{2,}(?:\s+[A-Z]{2,})*)\b/g,
-    (match) => {
-      // Don't modify short words like "I" or common acronyms
-      if (match.length <= 2) return match;
-      // Add slight pauses around sound effects
-      return `... ${match} ...`;
-    }
+    /\b([A-Z]{3,}(?:\s+[A-Z]{3,})*)\b/g,
+    (match) => `, ${match},`
   );
-  // Add pause before quotes (dialogue)
-  prepared = prepared.replace(/"([^"]+)"/g, '... "$1"');
-  // Clean up excessive pauses
-  prepared = prepared.replace(/(\.\.\.\s*){3,}/g, "... ... ");
-  prepared = prepared.replace(/^\s*\.\.\.\s*/, "");
+
+  // Add a tiny pause before opening dialogue for dramatic effect
+  prepared = prepared.replace(/\s+"([^"]+)"/g, ', "$1"');
+
+  // Em-dashes become pauses
+  prepared = prepared.replace(/\s*—\s*/g, ", ");
+  prepared = prepared.replace(/\s*–\s*/g, ", ");
+
+  // Clean up double commas or comma-period combos
+  prepared = prepared.replace(/,\s*,/g, ",");
+  prepared = prepared.replace(/,\s*\./g, ".");
+  prepared = prepared.replace(/\.\s*,/g, ".");
+  prepared = prepared.replace(/^\s*,\s*/, "");
+
   return prepared;
 }
 
