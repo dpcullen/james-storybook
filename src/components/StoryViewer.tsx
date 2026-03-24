@@ -244,16 +244,19 @@ export default function StoryViewer({
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [activeParagraph, setActiveParagraph] = useState<number>(-1);
-  const [activeWordRange, setActiveWordRange] = useState<{
-    start: number;
-    end: number;
-  } | null>(null);
+  const [activeWordIndex, setActiveWordIndex] = useState<number>(-1);
   const [voiceReady, setVoiceReady] = useState(false);
 
   const storyRef = useRef<HTMLDivElement>(null);
   const paragraphRefs = useRef<(HTMLParagraphElement | null)[]>([]);
   const playingRef = useRef(false);
   const cancelledRef = useRef(false);
+  const wordTimerRef = useRef<number | null>(null);
+  const pauseStartRef = useRef<number>(0);
+  const elapsedBeforePauseRef = useRef<number>(0);
+  const utteranceStartRef = useRef<number>(0);
+  const estimatedDurationRef = useRef<number>(0);
+  const totalWordsRef = useRef<number>(0);
 
   // Parse story into paragraphs (non-empty lines)
   const paragraphs = useMemo(() => {
@@ -280,7 +283,7 @@ export default function StoryViewer({
     setLoading(true);
     setStory("");
     setActiveParagraph(-1);
-    setActiveWordRange(null);
+    setActiveWordIndex(-1);
     setTimeout(() => {
       const newStory = getStory(category.id, length, timeOfDay, allStories);
       setStory(newStory);
@@ -292,6 +295,7 @@ export default function StoryViewer({
     pickStory();
     return () => {
       cancelledRef.current = true;
+      if (wordTimerRef.current) cancelAnimationFrame(wordTimerRef.current);
       window.speechSynthesis?.cancel();
     };
   }, [pickStory]);
@@ -303,6 +307,47 @@ export default function StoryViewer({
       el?.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   }, [activeParagraph]);
+
+  /** Time-based word tracker — works on all browsers including Safari/iPad.
+   *  Estimates which word is being spoken based on elapsed time. */
+  const startWordTimer = useCallback(
+    (wordCount: number, estimatedMs: number) => {
+      totalWordsRef.current = wordCount;
+      estimatedDurationRef.current = estimatedMs;
+      utteranceStartRef.current = performance.now();
+      elapsedBeforePauseRef.current = 0;
+
+      const tick = () => {
+        if (cancelledRef.current) return;
+
+        const elapsed =
+          elapsedBeforePauseRef.current +
+          (performance.now() - utteranceStartRef.current);
+        const progress = Math.min(elapsed / estimatedMs, 1);
+        const currentWord = Math.min(
+          Math.floor(progress * wordCount),
+          wordCount - 1
+        );
+
+        setActiveWordIndex(currentWord);
+
+        if (progress < 1 && !cancelledRef.current) {
+          wordTimerRef.current = requestAnimationFrame(tick);
+        }
+      };
+
+      wordTimerRef.current = requestAnimationFrame(tick);
+    },
+    []
+  );
+
+  const stopWordTimer = useCallback(() => {
+    if (wordTimerRef.current) {
+      cancelAnimationFrame(wordTimerRef.current);
+      wordTimerRef.current = null;
+    }
+    setActiveWordIndex(-1);
+  }, []);
 
   /** Speak a single paragraph and return a promise that resolves when done */
   const speakParagraph = useCallback(
@@ -320,74 +365,64 @@ export default function StoryViewer({
         const voice = pickBestVoice();
         if (voice) utterance.voice = voice;
 
-        // Determine if this is a night/bedtime paragraph
+        // Determine paragraph type for speech tuning
         const isNightMode = timeOfDay === "night";
-        const isEnding =
-          text === "The End." || text === "The End";
+        const isEnding = text === "The End." || text === "The End";
         const isSoundEffect = /^[A-Z!.\s]+$/.test(text) && text.length < 40;
 
         // Vary rate and pitch for expressiveness
+        let rate: number;
         if (isNightMode) {
-          utterance.rate = 0.78;
+          rate = 0.78;
           utterance.pitch = 0.95;
         } else if (isEnding) {
-          utterance.rate = 0.7;
+          rate = 0.7;
           utterance.pitch = 1.05;
         } else if (isSoundEffect) {
-          utterance.rate = 0.75;
+          rate = 0.75;
           utterance.pitch = 1.1;
         } else {
-          // Slight random variation makes it feel more natural
-          utterance.rate = 0.82 + Math.random() * 0.06;
+          rate = 0.82 + Math.random() * 0.06;
           utterance.pitch = 0.98 + Math.random() * 0.06;
         }
+        utterance.rate = rate;
         utterance.volume = 1.0;
 
         // Track active paragraph
         setActiveParagraph(paragraphIndex);
-        setActiveWordRange(null);
+        setActiveWordIndex(-1);
 
-        // Word-level boundary tracking for highlighting
-        utterance.onboundary = (event) => {
-          if (event.name === "word") {
-            // Map char index in prepared text back to approximate word position in original
-            const spokenSoFar = prepared.substring(0, event.charIndex + event.charLength);
-            // Count actual words (skip pause markers)
-            const wordsSpoken = spokenSoFar
-              .replace(/\.\.\./g, "")
-              .trim()
-              .split(/\s+/)
-              .filter((w) => w.length > 0).length;
+        // Estimate duration for time-based word tracking
+        // Average ~160 words/min at rate 1.0, adjusted by actual rate
+        const originalWords = text.split(/\s+/).filter((w) => w.length > 0);
+        const preparedWords = prepared.split(/\s+/).filter((w) => w.length > 0);
+        const wordsPerMinute = 155 * rate;
+        const estimatedMs = (preparedWords.length / wordsPerMinute) * 60 * 1000;
 
-            const totalWords = text.split(/\s+/).filter((w) => w.length > 0).length;
-            const wordIndex = Math.min(wordsSpoken - 1, totalWords - 1);
-
-            if (wordIndex >= 0) {
-              setActiveWordRange({
-                start: Math.max(0, wordIndex),
-                end: Math.min(wordIndex + 1, totalWords),
-              });
-            }
-          }
+        utterance.onstart = () => {
+          startWordTimer(originalWords.length, estimatedMs);
         };
 
         utterance.onend = () => {
-          setActiveWordRange(null);
+          stopWordTimer();
+          // Flash all words as "read" briefly
+          setActiveWordIndex(originalWords.length);
           resolve();
         };
 
         utterance.onerror = (e) => {
+          stopWordTimer();
           if (e.error === "canceled" || e.error === "interrupted") {
             reject(new Error("cancelled"));
           } else {
-            resolve(); // Skip paragraph on other errors
+            resolve();
           }
         };
 
         window.speechSynthesis.speak(utterance);
       });
     },
-    [timeOfDay]
+    [timeOfDay, startWordTimer, stopWordTimer]
   );
 
   /** Play the full story paragraph by paragraph with natural pauses */
@@ -442,32 +477,40 @@ export default function StoryViewer({
     setIsPlaying(false);
     setIsPaused(false);
     setActiveParagraph(-1);
-    setActiveWordRange(null);
+    setActiveWordIndex(-1);
   }, [story, paragraphs, timeOfDay, speakParagraph]);
 
   const handlePlayPause = useCallback(() => {
     if (isPlaying) {
       if (isPaused) {
+        // Resume: restart the word timer from where we left off
         window.speechSynthesis.resume();
+        utteranceStartRef.current = performance.now();
+        startWordTimer(totalWordsRef.current, estimatedDurationRef.current - elapsedBeforePauseRef.current);
         setIsPaused(false);
       } else {
+        // Pause: save elapsed time and stop the word timer
         window.speechSynthesis.pause();
+        elapsedBeforePauseRef.current +=
+          performance.now() - utteranceStartRef.current;
+        if (wordTimerRef.current) cancelAnimationFrame(wordTimerRef.current);
         setIsPaused(true);
       }
     } else {
       playStory();
     }
-  }, [isPlaying, isPaused, playStory]);
+  }, [isPlaying, isPaused, playStory, startWordTimer]);
 
   const handleStop = useCallback(() => {
     cancelledRef.current = true;
+    stopWordTimer();
     window.speechSynthesis?.cancel();
     playingRef.current = false;
     setIsPlaying(false);
     setIsPaused(false);
     setActiveParagraph(-1);
-    setActiveWordRange(null);
-  }, []);
+    setActiveWordIndex(-1);
+  }, [stopWordTimer]);
 
   const handleAnotherStory = useCallback(() => {
     handleStop();
@@ -479,13 +522,12 @@ export default function StoryViewer({
   const textColor = isNight ? "text-blue-100" : "text-gray-800";
   const dimTextColor = isNight ? "text-blue-300/40" : "text-gray-800/30";
   const activeTextColor = isNight ? "text-white" : "text-gray-900";
+  const unreadInActiveColor = isNight ? "text-blue-100/50" : "text-gray-800/40";
 
   /** Render a paragraph with word-level highlighting */
   const renderParagraph = useCallback(
     (text: string, paragraphIndex: number) => {
       const isActive = paragraphIndex === activeParagraph && isPlaying;
-      const isRead = isPlaying && activeParagraph > paragraphIndex;
-      const isUnread = isPlaying && activeParagraph >= 0 && activeParagraph < paragraphIndex;
       const isEnding = text === "The End." || text === "The End";
 
       // When not playing, show all text normally
@@ -495,52 +537,51 @@ export default function StoryViewer({
         );
       }
 
-      // Dim paragraphs that have been read or are upcoming
-      if (isRead || isUnread) {
+      // Non-active paragraphs: just show text (parent <p> handles dimming)
+      if (!isActive) {
         return <span className={isEnding ? "font-bold" : ""}>{text}</span>;
       }
 
-      // Active paragraph: highlight word by word
-      if (isActive && activeWordRange) {
-        const words = text.split(/(\s+)/); // Keep whitespace tokens
-        let wordIndex = 0;
+      // Active paragraph: highlight each word as it's read
+      const tokens = text.split(/(\s+)/); // Keep whitespace tokens
+      let wordIndex = 0;
 
-        return (
-          <>
-            {words.map((token, tokenIdx) => {
-              // Whitespace tokens
-              if (/^\s+$/.test(token)) {
-                return <span key={tokenIdx}>{token}</span>;
-              }
+      return (
+        <>
+          {tokens.map((token, tokenIdx) => {
+            // Whitespace tokens — just render as-is
+            if (/^\s+$/.test(token)) {
+              return <span key={tokenIdx}>{token}</span>;
+            }
 
-              const isHighlighted =
-                wordIndex >= activeWordRange.start &&
-                wordIndex < activeWordRange.end;
-              const isPast = wordIndex < activeWordRange.start;
-              wordIndex++;
+            const thisWordIndex = wordIndex;
+            wordIndex++;
 
-              return (
-                <span
-                  key={tokenIdx}
-                  className={
-                    isHighlighted
-                      ? `highlight-word ${isNight ? "highlight-word-night" : "highlight-word-day"}`
-                      : isPast
-                        ? activeTextColor
+            const isCurrentWord = thisWordIndex === activeWordIndex;
+            const isAlreadyRead = activeWordIndex >= 0 && thisWordIndex < activeWordIndex;
+            const isUpcoming = activeWordIndex >= 0 && thisWordIndex > activeWordIndex;
+
+            return (
+              <span
+                key={tokenIdx}
+                className={
+                  isCurrentWord
+                    ? `highlight-word ${isNight ? "highlight-word-night" : "highlight-word-day"}`
+                    : isAlreadyRead
+                      ? activeTextColor
+                      : isUpcoming
+                        ? unreadInActiveColor
                         : ""
-                  }
-                >
-                  {token}
-                </span>
-              );
-            })}
-          </>
-        );
-      }
-
-      return <span className={isEnding ? "font-bold" : ""}>{text}</span>;
+                }
+              >
+                {token}
+              </span>
+            );
+          })}
+        </>
+      );
     },
-    [activeParagraph, activeWordRange, isPlaying, isNight, activeTextColor]
+    [activeParagraph, activeWordIndex, isPlaying, isNight, activeTextColor, unreadInActiveColor]
   );
 
   return (
