@@ -85,6 +85,26 @@ body {
 .dot-2 { animation: dot-pulse 1.4s ease-in-out 0.2s infinite; }
 .dot-3 { animation: dot-pulse 1.4s ease-in-out 0.4s infinite; }
 
+/* Word highlighting during narration */
+.highlight-word {
+  transition: all 0.15s ease;
+  border-radius: 3px;
+  padding: 1px 2px;
+  margin: -1px -2px;
+}
+
+.highlight-word-day {
+  background: linear-gradient(135deg, #fef08a, #fde047);
+  color: #1e293b;
+  box-shadow: 0 1px 4px rgba(253, 224, 71, 0.4);
+}
+
+.highlight-word-night {
+  background: linear-gradient(135deg, #6366f1, #818cf8);
+  color: #ffffff;
+  box-shadow: 0 1px 8px rgba(99, 102, 241, 0.5);
+}
+
 /* PWA safe areas */
 @supports (padding: env(safe-area-inset-top)) {
   .safe-top { padding-top: env(safe-area-inset-top); }

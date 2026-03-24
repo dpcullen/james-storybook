@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
 import type { Category } from "@/lib/categories";
 import type { StoryLength, TimeOfDay } from "@/lib/storyPrompts";
@@ -15,6 +15,71 @@ interface StoryViewerProps {
   onNewStory: () => void;
 }
 
+/** Prepare text for more expressive speech */
+function prepareForSpeech(text: string): string {
+  let prepared = text;
+  // Add pauses after exclamations and dramatic moments
+  prepared = prepared.replace(/!/g, "! ...");
+  // Slow down sound effects by adding spaces (ALL CAPS words)
+  prepared = prepared.replace(
+    /\b([A-Z]{2,}(?:\s+[A-Z]{2,})*)\b/g,
+    (match) => {
+      // Don't modify short words like "I" or common acronyms
+      if (match.length <= 2) return match;
+      // Add slight pauses around sound effects
+      return `... ${match} ...`;
+    }
+  );
+  // Add pause before quotes (dialogue)
+  prepared = prepared.replace(/"([^"]+)"/g, '... "$1"');
+  // Clean up excessive pauses
+  prepared = prepared.replace(/(\.\.\.\s*){3,}/g, "... ... ");
+  prepared = prepared.replace(/^\s*\.\.\.\s*/, "");
+  return prepared;
+}
+
+/** Pick the best available voice, preferring natural/premium ones */
+function pickBestVoice(): SpeechSynthesisVoice | null {
+  const voices = window.speechSynthesis.getVoices();
+  if (voices.length === 0) return null;
+
+  // Priority list: premium/enhanced voices sound much more natural
+  const preferenceOrder = [
+    // iOS/macOS premium voices (very natural)
+    (v: SpeechSynthesisVoice) =>
+      v.name.includes("Premium") && v.lang.startsWith("en"),
+    (v: SpeechSynthesisVoice) =>
+      v.name.includes("Enhanced") && v.lang.startsWith("en"),
+    // Specific high-quality voices
+    (v: SpeechSynthesisVoice) => v.name.includes("Samantha"),
+    (v: SpeechSynthesisVoice) => v.name.includes("Karen"),
+    (v: SpeechSynthesisVoice) => v.name.includes("Moira"),
+    (v: SpeechSynthesisVoice) => v.name.includes("Tessa"),
+    (v: SpeechSynthesisVoice) => v.name.includes("Daniel"),
+    // Google voices (Chrome)
+    (v: SpeechSynthesisVoice) =>
+      v.name.includes("Google UK English Female"),
+    (v: SpeechSynthesisVoice) =>
+      v.name.includes("Google US English"),
+    // Microsoft voices (Edge/Windows)
+    (v: SpeechSynthesisVoice) =>
+      v.name.includes("Microsoft Aria") || v.name.includes("Microsoft Jenny"),
+    (v: SpeechSynthesisVoice) =>
+      v.name.includes("Microsoft") && v.lang.startsWith("en"),
+    // Any English local voice
+    (v: SpeechSynthesisVoice) =>
+      v.lang.startsWith("en") && v.localService,
+    // Any English voice at all
+    (v: SpeechSynthesisVoice) => v.lang.startsWith("en"),
+  ];
+
+  for (const test of preferenceOrder) {
+    const found = voices.find(test);
+    if (found) return found;
+  }
+  return voices[0] || null;
+}
+
 export default function StoryViewer({
   category,
   length,
@@ -25,13 +90,45 @@ export default function StoryViewer({
   const [story, setStory] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [isPlaying, setIsPlaying] = useState(false);
-  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const [isPaused, setIsPaused] = useState(false);
+  const [activeParagraph, setActiveParagraph] = useState<number>(-1);
+  const [activeWordRange, setActiveWordRange] = useState<{
+    start: number;
+    end: number;
+  } | null>(null);
+  const [voiceReady, setVoiceReady] = useState(false);
+
   const storyRef = useRef<HTMLDivElement>(null);
+  const paragraphRefs = useRef<(HTMLParagraphElement | null)[]>([]);
+  const playingRef = useRef(false);
+  const cancelledRef = useRef(false);
+
+  // Parse story into paragraphs (non-empty lines)
+  const paragraphs = useMemo(() => {
+    return story
+      .split("\n")
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+  }, [story]);
+
+  // Load voices (they load async on some browsers)
+  useEffect(() => {
+    const loadVoices = () => {
+      const voices = window.speechSynthesis.getVoices();
+      if (voices.length > 0) setVoiceReady(true);
+    };
+    loadVoices();
+    window.speechSynthesis.onvoiceschanged = loadVoices;
+    return () => {
+      window.speechSynthesis.onvoiceschanged = null;
+    };
+  }, []);
 
   const pickStory = useCallback(() => {
     setLoading(true);
     setStory("");
-    // Small delay for a nice loading animation
+    setActiveParagraph(-1);
+    setActiveWordRange(null);
     setTimeout(() => {
       const newStory = getStory(category.id, length, timeOfDay, allStories);
       setStory(newStory);
@@ -42,47 +139,182 @@ export default function StoryViewer({
   useEffect(() => {
     pickStory();
     return () => {
+      cancelledRef.current = true;
       window.speechSynthesis?.cancel();
     };
   }, [pickStory]);
 
-  // Browser speech narration
-  const playBrowserNarration = useCallback(() => {
-    if (!story) return;
+  // Auto-scroll to active paragraph
+  useEffect(() => {
+    if (activeParagraph >= 0 && paragraphRefs.current[activeParagraph]) {
+      const el = paragraphRefs.current[activeParagraph];
+      el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [activeParagraph]);
 
-    if (isPlaying) {
-      window.speechSynthesis.cancel();
-      setIsPlaying(false);
-      return;
+  /** Speak a single paragraph and return a promise that resolves when done */
+  const speakParagraph = useCallback(
+    (text: string, paragraphIndex: number): Promise<void> => {
+      return new Promise((resolve, reject) => {
+        if (cancelledRef.current) {
+          reject(new Error("cancelled"));
+          return;
+        }
+
+        const prepared = prepareForSpeech(text);
+        const utterance = new SpeechSynthesisUtterance(prepared);
+
+        // Voice settings
+        const voice = pickBestVoice();
+        if (voice) utterance.voice = voice;
+
+        // Determine if this is a night/bedtime paragraph
+        const isNightMode = timeOfDay === "night";
+        const isEnding =
+          text === "The End." || text === "The End";
+        const isSoundEffect = /^[A-Z!.\s]+$/.test(text) && text.length < 40;
+
+        // Vary rate and pitch for expressiveness
+        if (isNightMode) {
+          utterance.rate = 0.78;
+          utterance.pitch = 0.95;
+        } else if (isEnding) {
+          utterance.rate = 0.7;
+          utterance.pitch = 1.05;
+        } else if (isSoundEffect) {
+          utterance.rate = 0.75;
+          utterance.pitch = 1.1;
+        } else {
+          // Slight random variation makes it feel more natural
+          utterance.rate = 0.82 + Math.random() * 0.06;
+          utterance.pitch = 0.98 + Math.random() * 0.06;
+        }
+        utterance.volume = 1.0;
+
+        // Track active paragraph
+        setActiveParagraph(paragraphIndex);
+        setActiveWordRange(null);
+
+        // Word-level boundary tracking for highlighting
+        utterance.onboundary = (event) => {
+          if (event.name === "word") {
+            // Map char index in prepared text back to approximate word position in original
+            const spokenSoFar = prepared.substring(0, event.charIndex + event.charLength);
+            // Count actual words (skip pause markers)
+            const wordsSpoken = spokenSoFar
+              .replace(/\.\.\./g, "")
+              .trim()
+              .split(/\s+/)
+              .filter((w) => w.length > 0).length;
+
+            const totalWords = text.split(/\s+/).filter((w) => w.length > 0).length;
+            const wordIndex = Math.min(wordsSpoken - 1, totalWords - 1);
+
+            if (wordIndex >= 0) {
+              setActiveWordRange({
+                start: Math.max(0, wordIndex),
+                end: Math.min(wordIndex + 1, totalWords),
+              });
+            }
+          }
+        };
+
+        utterance.onend = () => {
+          setActiveWordRange(null);
+          resolve();
+        };
+
+        utterance.onerror = (e) => {
+          if (e.error === "canceled" || e.error === "interrupted") {
+            reject(new Error("cancelled"));
+          } else {
+            resolve(); // Skip paragraph on other errors
+          }
+        };
+
+        window.speechSynthesis.speak(utterance);
+      });
+    },
+    [timeOfDay]
+  );
+
+  /** Play the full story paragraph by paragraph with natural pauses */
+  const playStory = useCallback(async () => {
+    if (!story || paragraphs.length === 0) return;
+
+    cancelledRef.current = false;
+    playingRef.current = true;
+    setIsPlaying(true);
+    setIsPaused(false);
+
+    const isNightMode = timeOfDay === "night";
+
+    for (let i = 0; i < paragraphs.length; i++) {
+      if (cancelledRef.current) break;
+
+      try {
+        await speakParagraph(paragraphs[i], i);
+      } catch {
+        break; // cancelled
+      }
+
+      if (cancelledRef.current) break;
+
+      // Natural pause between paragraphs
+      const isDialogue = paragraphs[i].includes('"');
+      const isEndOfScene =
+        paragraphs[i].endsWith(".") && !isDialogue;
+      const pauseDuration = isNightMode
+        ? 900
+        : isEndOfScene
+          ? 700
+          : isDialogue
+            ? 400
+            : 550;
+
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, pauseDuration);
+        // Allow cancellation during pause
+        const checkCancel = setInterval(() => {
+          if (cancelledRef.current) {
+            clearTimeout(timer);
+            clearInterval(checkCancel);
+            resolve();
+          }
+        }, 50);
+        setTimeout(() => clearInterval(checkCancel), pauseDuration + 100);
+      });
     }
 
-    const utterance = new SpeechSynthesisUtterance(story);
-    utterance.rate = 0.85;
-    utterance.pitch = 1.0;
-    utterance.volume = 1.0;
+    playingRef.current = false;
+    setIsPlaying(false);
+    setIsPaused(false);
+    setActiveParagraph(-1);
+    setActiveWordRange(null);
+  }, [story, paragraphs, timeOfDay, speakParagraph]);
 
-    // Try to find a good English voice
-    const voices = window.speechSynthesis.getVoices();
-    const preferred = voices.find(
-      (v) =>
-        v.name.includes("Samantha") ||
-        v.name.includes("Daniel") ||
-        v.name.includes("Google UK English Male") ||
-        (v.lang.startsWith("en") && v.localService)
-    );
-    if (preferred) utterance.voice = preferred;
-
-    utterance.onend = () => setIsPlaying(false);
-    utterance.onerror = () => setIsPlaying(false);
-
-    utteranceRef.current = utterance;
-    window.speechSynthesis.speak(utterance);
-    setIsPlaying(true);
-  }, [story, isPlaying]);
+  const handlePlayPause = useCallback(() => {
+    if (isPlaying) {
+      if (isPaused) {
+        window.speechSynthesis.resume();
+        setIsPaused(false);
+      } else {
+        window.speechSynthesis.pause();
+        setIsPaused(true);
+      }
+    } else {
+      playStory();
+    }
+  }, [isPlaying, isPaused, playStory]);
 
   const handleStop = useCallback(() => {
+    cancelledRef.current = true;
     window.speechSynthesis?.cancel();
+    playingRef.current = false;
     setIsPlaying(false);
+    setIsPaused(false);
+    setActiveParagraph(-1);
+    setActiveWordRange(null);
   }, []);
 
   const handleAnotherStory = useCallback(() => {
@@ -93,6 +325,71 @@ export default function StoryViewer({
 
   const isNight = timeOfDay === "night";
   const textColor = isNight ? "text-blue-100" : "text-gray-800";
+  const dimTextColor = isNight ? "text-blue-300/40" : "text-gray-800/30";
+  const activeTextColor = isNight ? "text-white" : "text-gray-900";
+
+  /** Render a paragraph with word-level highlighting */
+  const renderParagraph = useCallback(
+    (text: string, paragraphIndex: number) => {
+      const isActive = paragraphIndex === activeParagraph && isPlaying;
+      const isRead = isPlaying && activeParagraph > paragraphIndex;
+      const isUnread = isPlaying && activeParagraph >= 0 && activeParagraph < paragraphIndex;
+      const isEnding = text === "The End." || text === "The End";
+
+      // When not playing, show all text normally
+      if (!isPlaying || activeParagraph < 0) {
+        return (
+          <span className={isEnding ? "font-bold" : ""}>{text}</span>
+        );
+      }
+
+      // Dim paragraphs that have been read or are upcoming
+      if (isRead || isUnread) {
+        return <span className={isEnding ? "font-bold" : ""}>{text}</span>;
+      }
+
+      // Active paragraph: highlight word by word
+      if (isActive && activeWordRange) {
+        const words = text.split(/(\s+)/); // Keep whitespace tokens
+        let wordIndex = 0;
+
+        return (
+          <>
+            {words.map((token, tokenIdx) => {
+              // Whitespace tokens
+              if (/^\s+$/.test(token)) {
+                return <span key={tokenIdx}>{token}</span>;
+              }
+
+              const isHighlighted =
+                wordIndex >= activeWordRange.start &&
+                wordIndex < activeWordRange.end;
+              const isPast = wordIndex < activeWordRange.start;
+              wordIndex++;
+
+              return (
+                <span
+                  key={tokenIdx}
+                  className={
+                    isHighlighted
+                      ? `highlight-word ${isNight ? "highlight-word-night" : "highlight-word-day"}`
+                      : isPast
+                        ? activeTextColor
+                        : ""
+                  }
+                >
+                  {token}
+                </span>
+              );
+            })}
+          </>
+        );
+      }
+
+      return <span className={isEnding ? "font-bold" : ""}>{text}</span>;
+    },
+    [activeParagraph, activeWordRange, isPlaying, isNight, activeTextColor]
+  );
 
   return (
     <motion.div
@@ -117,14 +414,19 @@ export default function StoryViewer({
               }}
             />
           ))}
-          <div className="absolute top-6 right-8 text-5xl opacity-80">🌙</div>
+          <div className="absolute top-6 right-8 text-5xl opacity-80">
+            🌙
+          </div>
         </div>
       )}
 
       {/* Header */}
       <div className="flex items-center justify-between p-3 z-10">
         <motion.button
-          onClick={onHome}
+          onClick={() => {
+            handleStop();
+            onHome();
+          }}
           className="btn-bounce text-2xl p-2"
           whileTap={{ scale: 0.9 }}
         >
@@ -177,24 +479,47 @@ export default function StoryViewer({
             className="max-w-xl mx-auto"
           >
             <div className="story-text">
-              {story.split("\n").map((paragraph, i) => {
-                const trimmed = paragraph.trim();
-                if (!trimmed) return null;
+              {paragraphs.map((paragraph, i) => {
                 const isEnding =
-                  trimmed === "The End." || trimmed === "The End";
+                  paragraph === "The End." || paragraph === "The End";
+                const isActive = i === activeParagraph && isPlaying;
+                const isRead =
+                  isPlaying && activeParagraph >= 0 && i < activeParagraph;
+                const isUnread =
+                  isPlaying && activeParagraph >= 0 && i > activeParagraph;
+
                 return (
                   <motion.p
                     key={i}
+                    ref={(el) => {
+                      paragraphRefs.current[i] = el;
+                    }}
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: i * 0.1 }}
-                    className={`${textColor} text-xl sm:text-2xl leading-relaxed mb-4 ${
+                    transition={{ delay: Math.min(i * 0.08, 2) }}
+                    className={`text-xl sm:text-2xl leading-relaxed mb-4 transition-all duration-300 ${
                       isEnding
                         ? "text-center text-2xl sm:text-3xl font-bold mt-8"
                         : ""
+                    } ${
+                      isActive
+                        ? `${activeTextColor} font-medium scale-[1.01] origin-left`
+                        : isRead
+                          ? dimTextColor
+                          : isUnread
+                            ? `${textColor} opacity-60`
+                            : textColor
                     }`}
+                    style={{
+                      // Subtle glow on active paragraph
+                      textShadow: isActive
+                        ? isNight
+                          ? "0 0 20px rgba(147, 197, 253, 0.3)"
+                          : "none"
+                        : "none",
+                    }}
                   >
-                    {trimmed}
+                    {renderParagraph(paragraph, i)}
                   </motion.p>
                 );
               })}
@@ -217,15 +542,15 @@ export default function StoryViewer({
           <div className="flex items-center justify-center gap-3 p-3 max-w-xl mx-auto">
             {/* Play/Pause */}
             <motion.button
-              onClick={playBrowserNarration}
+              onClick={handlePlayPause}
               whileTap={{ scale: 0.9 }}
               className={`btn-bounce text-3xl p-3 rounded-full shadow-lg ${
-                isPlaying
+                isPlaying && !isPaused
                   ? "bg-sunset text-white"
                   : "bg-gradient-to-r from-green-400 to-green-500 text-white"
               }`}
             >
-              {isPlaying ? "⏸️" : "▶️"}
+              {isPlaying && !isPaused ? "⏸️" : "▶️"}
             </motion.button>
 
             {/* Stop */}
