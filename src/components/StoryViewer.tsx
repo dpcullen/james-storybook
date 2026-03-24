@@ -15,10 +15,147 @@ interface StoryViewerProps {
   onNewStory: () => void;
 }
 
+/**
+ * Map of sound effects and animal sounds to speech-friendly versions.
+ * ALL CAPS words get spelled out by the speech engine, so we convert them.
+ * We also stretch/emphasize sounds to make them more expressive and fun.
+ */
+const soundEffectMap: Record<string, string> = {
+  // Action sounds
+  WHOOSH: "Woooosh!",
+  WHOOOOSH: "Woooooosh!",
+  WHOOOOOOSH: "Woooooooosh!",
+  FWOOSH: "Fwoooosh!",
+  SWOOSH: "Swooosh!",
+  SWOOOSH: "Swoooosh!",
+  WHOMP: "Whomp!",
+  FWOMP: "Fwomp!",
+  ZOOM: "Zooom!",
+  ZOOOM: "Zoooom!",
+  ZOOOOM: "Zooooom!",
+  VROOM: "Vroooom!",
+  WHOOOOOM: "Whoooom!",
+  WHIRRRR: "Whirrrr!",
+  WHEEE: "Wheeee!",
+  WHEEEE: "Wheeeee!",
+  WHEEEEE: "Wheeeeee!",
+  WOOOAAAA: "Woooaaah!",
+
+  // Impact sounds
+  CRASH: "Crash!",
+  BANG: "Bang!",
+  BOOM: "Boom!",
+  THUMP: "Thump!",
+  BUMP: "Bump!",
+  STOMP: "Stomp!",
+  CLUNK: "Clunk!",
+  POP: "Pop!",
+  CRACK: "Crack!",
+  SNAP: "Snap!",
+  CREAK: "Creeeak!",
+  CREEEAK: "Creeeeak!",
+  CREEEEAK: "Creeeeeak!",
+  CLAP: "Clap!",
+  ZAP: "Zap!",
+
+  // Water sounds
+  SPLASH: "Splash!",
+  SPLOSH: "Splosh!",
+  SPLOOSH: "Splooosh!",
+  SPLOOOOSH: "Sploooosh!",
+  SPLISHY: "Splishy!",
+  SWISH: "Swish!",
+  BLUB: "Blub!",
+
+  // Vehicle sounds
+  BEEP: "Beep!",
+  BEEEP: "Beeep!",
+  BEEEEP: "Beeeep!",
+  TOOT: "Toot!",
+  TOOOT: "Toooot!",
+  TOOOOT: "Tooooot!",
+  TOOOOOOT: "Tooooooot!",
+  TOOOOOOOT: "Toooooooot!",
+  NEEENAW: "Nee-naw!",
+  CHOO: "Choo!",
+  CHUG: "Chug!",
+  CHUGGA: "Chugga!",
+  PUTT: "Putt!",
+  VRRRRR: "Vrrrr!",
+
+  // Animal sounds - stretched and expressive
+  ROAR: "Roaaarr!",
+  ROAAARRR: "Roaaaarrrr!",
+  RAWR: "Rawrr!",
+  ROOO: "Rooo!",
+  MOO: "Mooo!",
+  MOOOO: "Mooooo!",
+  QUACK: "Quack!",
+  WOOF: "Woof!",
+  ARF: "Arf!",
+  BAAAA: "Baaaa!",
+  OINK: "Oink!",
+  CLUCK: "Cluck!",
+  SQUEAK: "Squeak!",
+  SQUEEEAK: "Squeeeeak!",
+  RIBBIT: "Ribbit!",
+  MIAOW: "Miaow!",
+  MIAOWWW: "Miaowww!",
+  MRRROW: "Mrrow!",
+  PEEP: "Peep!",
+  CHEEP: "Cheep!",
+  CHIRP: "Chirp!",
+  HONK: "Honk!",
+  HOOT: "Hoot!",
+  HOOOO: "Hooo!",
+  ACHOO: "Achoo!",
+  PURR: "Purrrr!",
+  PURRR: "Purrrrr!",
+  PURRRR: "Purrrrrr!",
+  HISS: "Hisss!",
+  BUZZ: "Buzzz!",
+  CRICK: "Crick!",
+  CLICK: "Click!",
+
+  // Human / reaction sounds
+  HOORAY: "Hooray!",
+  WOW: "Wow!",
+  WHOA: "Whoa!",
+  YUM: "Yum!",
+  HAHAHA: "Ha ha ha!",
+  MMMM: "Mmmmm!",
+
+  // Action descriptors
+  BOING: "Boing!",
+  FLAP: "Flap!",
+  FWUMP: "Fwump!",
+  FLASH: "Flash!",
+  DING: "Ding!",
+  SCRAPE: "Scrape!",
+  SCRATCH: "Scratch!",
+  CRUNCH: "Crunch!",
+  SLURP: "Slurp!",
+  LICK: "Lick!",
+  BOOP: "Boop!",
+  POOF: "Poof!",
+  FLURFF: "Flurff!",
+  SQUISH: "Squish!",
+  SPLAT: "Splat!",
+  DUMP: "Dump!",
+  SCOOP: "Scoop!",
+  BOUNCE: "Bounce!",
+  SWOOP: "Swoop!",
+  SWOOOP: "Swooop!",
+
+  // Misc
+  PSSSSHHHH: "Psssshhh!",
+  CHIT: "Chit!",
+};
+
 /** Prepare text for more expressive speech.
- *  Uses commas and periods to create natural pauses —
- *  the speech engine treats punctuation as breathing room,
- *  NOT as spoken words. Never insert "..." as the voice reads it literally. */
+ *  - Converts ALL CAPS to title case so the voice doesn't spell them out
+ *  - Replaces known sound effects with expressive, stretched versions
+ *  - Uses commas/periods for natural breathing pauses */
 function prepareForSpeech(text: string): string {
   let prepared = text;
 
@@ -26,11 +163,16 @@ function prepareForSpeech(text: string): string {
   prepared = prepared.replace(/\.{2,}/g, ",");
   prepared = prepared.replace(/…/g, ",");
 
-  // Add a short breath pause before sound effects (ALL CAPS 3+ chars)
-  prepared = prepared.replace(
-    /\b([A-Z]{3,}(?:\s+[A-Z]{3,})*)\b/g,
-    (match) => `, ${match},`
-  );
+  // Replace known sound effects with expressive versions (before lowercasing)
+  // Match ALL-CAPS words (2+ chars) and check the map
+  prepared = prepared.replace(/\b([A-Z]{2,})\b/g, (match) => {
+    // Check exact match in our sound map
+    if (soundEffectMap[match]) {
+      return soundEffectMap[match];
+    }
+    // For unknown ALL-CAPS words, convert to Title Case so they aren't spelled out
+    return match.charAt(0) + match.slice(1).toLowerCase();
+  });
 
   // Add a tiny pause before opening dialogue for dramatic effect
   prepared = prepared.replace(/\s+"([^"]+)"/g, ', "$1"');
